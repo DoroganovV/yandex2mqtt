@@ -2,13 +2,15 @@
 
 const fs = require('fs');
 const path = require('path');
+const { X509Certificate } = require('crypto');
 /* */
-const {createLogger, format, transports} = require('winston');
+const { createLogger, format, transports } = require('winston');
 /* express and https */
 const ejs = require('ejs');
 const express = require('express');
 const app = express();
 const https = require('https');
+const http = require('http');
 /* parsers */
 const cookieParser = require('cookie-parser');
 /* error handler */
@@ -31,9 +33,9 @@ const clArgv = process.argv.slice(2);
 global.logger = createLogger({
     level: 'info',
     format: format.combine(
-        format.errors({stack: true}),
+        format.errors({ stack: true }),
         format.timestamp(),
-        format.printf(({level, message, timestamp, stack}) => {
+        format.printf(({ level, message, timestamp, stack }) => {
             return `${timestamp} ${level}: ${stack != undefined ? stack : message}`;
         }),
     ),
@@ -44,7 +46,7 @@ global.logger = createLogger({
     ],
 });
 
-if (clArgv.indexOf('--log-error') > -1) global.logger.add(new transports.File({filename: 'log/error.log', level: 'error'}));
+if (clArgv.indexOf('--log-error') > -1) global.logger.add(new transports.File({ filename: 'log/error.log', level: 'error' }));
 
 /* */
 app.engine('ejs', ejs.__express);
@@ -73,7 +75,7 @@ app.use(passport.session());
 require('./auth');
 
 /* routers */
-const {site: r_site, oauth2: r_oauth2, user: r_user, client: r_client} = require('./routes');
+const { site: r_site, oauth2: r_oauth2, user: r_user, client: r_client } = require('./routes');
 
 app.get('/', r_site.index);
 app.get('/login', r_site.loginForm);
@@ -92,15 +94,10 @@ app.post('/provider/v1.0/user/devices/query', r_user.query);
 app.post('/provider/v1.0/user/devices/action', r_user.action);
 app.post('/provider/v1.0/user/unlink', r_user.unlink);
 
-/* create https server */
-const privateKey = fs.readFileSync(config.https.privateKey, 'utf8');
-const certificate = fs.readFileSync(config.https.certificate, 'utf8');
-const credentials = {
-    key: privateKey,
-    cert: certificate,
-};
-const httpsServer = https.createServer(credentials, app);
-httpsServer.listen(config.https.port);
+const httpServer = http.createServer(app);
+httpServer.listen(80);
+console.log('Web server started');
+/* -------------------- ------------- -------------------- */
 
 /* cache devices from config to global */
 global.devices = [];
@@ -114,9 +111,9 @@ if (config.devices) {
 const subscriptions = [];
 global.devices.forEach(device => {
     device.data.custom_data.mqtt.forEach(mqtt => {
-        const {instance, state: topic} = mqtt;
+        const { instance, state: topic } = mqtt;
         if (instance != undefined && topic != undefined) {
-            subscriptions.push({deviceId: device.data.id, instance, topic});
+            subscriptions.push({ deviceId: device.data.id, instance, topic });
         }
     });
 });
@@ -134,13 +131,12 @@ global.mqttClient = mqtt.connect(`mqtt://${config.mqtt.host}`, {
     const subscription = subscriptions.find(sub => topic.toLowerCase() === sub.topic.toLowerCase());
     if (subscription == undefined) return;
 
-    const {deviceId, instance} = subscription;
+    const { deviceId, instance } = subscription;
     const ldevice = global.devices.find(d => d.data.id == deviceId);
-    ldevice.updateState(`${message}`, instance);
-
+    if (!ldevice.updateState(`${message}`, instance)) return;
     /* Make Request to Yandex Dialog notification API */
     Promise.all(config.notification.map(el => {
-        let {skill_id, oauth_token, user_id} = el;
+        let { skill_id, oauth_token, user_id } = el;
 
         return new Promise((resolve, reject) => {
             let req = https.request({
@@ -154,15 +150,15 @@ global.mqttClient = mqtt.connect(`mqtt://${config.mqtt.host}`, {
                 }
             }, res => {
                 res.on('data', d => {
-                    global.logger.log('info', {message: `${d}`});
+                    global.logger.log('info', { message: `${d}` });
                 });
             });
-                
+
             req.on('error', error => {
-                global.logger.log('error', {message: `${error}`});
+                global.logger.log('error', { message: `${error}` });
             });
-            
-            let {id, capabilities, properties} = ldevice.getState();
+
+            const { id, capabilities, properties } = ldevice.getState();
             req.write(JSON.stringify({
                 "ts": Math.floor(Date.now() / 1000),
                 "payload": {
@@ -174,13 +170,11 @@ global.mqttClient = mqtt.connect(`mqtt://${config.mqtt.host}`, {
                     }],
                 }
             }));
-
             req.end();
 
             resolve(true);
         });
     }));
-
     /* */
 });
 
